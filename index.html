@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Swedish-Finnish Word Game</title>
+    <style>
+        /* Basic reset and typography */
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: sans-serif; padding: 20px; display: flex; flex-direction: column; align-items: center; }
+        button, input { font-size: 1em; padding: 10px; margin: 5px 0; }
+
+        /* Hide elements by default */
+        .hidden { display: none; }
+
+        /* Centered container */
+        .centered { text-align: center; }
+
+        /* Progress bar container */
+        #progress-container { width: 100%; max-width: 600px; background: #eee; height: 20px; border-radius: 10px; overflow: hidden; margin-bottom: 20px; }
+        #progress-bar { height: 100%; width: 0%; background: #76c7c0; transition: width 0.3s ease; }
+
+        /* Prompt and feedback */
+        #prompt-container { font-size: 1.5em; margin-bottom: 10px; }
+        #feedback { margin-top: 10px; height: 1.5em; }
+        #feedback.correct { color: green; }
+        #feedback.wrong { color: red; }
+
+        /* Responsive input */
+        #answer { width: 100%; max-width: 600px; }
+    </style>
+</head>
+<body>
+    <!-- Direction selection screen -->
+    <div id="direction-selection" class="centered">
+        <h1>Choose Translation Direction</h1>
+        <button id="sw-fi-btn">Swedish → Finnish</button>
+        <button id="fi-sw-btn">Finnish → Swedish</button>
+    </div>
+
+    <!-- Game screen -->
+    <div id="game-screen" class="hidden centered" style="width:100%; max-width: 600px;">
+        <div id="progress-container">
+            <div id="progress-bar"></div>
+        </div>
+        <div id="prompt-container"></div>
+        <input type="text" id="answer" placeholder="Your translation" autocomplete="off" />
+        <button id="submit-btn">Submit</button>
+        <div id="feedback"></div>
+    </div>
+
+    <script>
+    (function() {
+        const CSV_URL = 'data.csv';
+        let data = [];  // Array of {fi: [...], sw: [...]} rows
+        let state = {}; // Map rowIndex -> consecutive correct count
+        let currentRowIndex = null;
+        let direction = null; // 'sw-fi' or 'fi-sw'
+
+        // Load saved state from localStorage
+        function loadState() {
+            const saved = localStorage.getItem('swfi-game-state');
+            if (saved) {
+                const obj = JSON.parse(saved);
+                state = obj.state || {};
+                direction = obj.direction || null;
+            }
+        }
+        // Save state + direction
+        function saveState() {
+            localStorage.setItem('swfi-game-state', JSON.stringify({ state, direction }));
+        }
+
+        // Parse CSV text into data array
+        function parseCSV(text) {
+            const lines = text.trim().split(/\r?\n/);
+            return lines.map(line => {
+                const cols = line.split(',').map(s => s.trim());
+                return {
+                    fi: cols.slice(0,5).filter(Boolean),
+                    sw: cols.slice(5,10).filter(Boolean)
+                };
+            });
+        }
+
+        // Fetch and initialize game data
+        function initData() {
+            fetch(CSV_URL)
+                .then(res => res.ok ? res.text() : Promise.reject('Failed to load CSV'))
+                .then(text => {
+                    data = parseCSV(text);
+                    // Initialize streaks if not present
+                    data.forEach((_, i) => { if (!(i in state)) state[i] = 0; });
+                    saveState();
+                    if (direction) {
+                        // Resume game if direction was chosen
+                        startGame();
+                    }
+                })
+                .catch(err => console.error(err));
+        }
+
+        // Utility: pick random element
+        function choice(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
+
+        // Start the game after direction is chosen
+        function startGame() {
+            document.getElementById('direction-selection').classList.add('hidden');
+            document.getElementById('game-screen').classList.remove('hidden');
+            saveState();
+            nextQuestion();
+        }
+
+        // Compute and update progress bar
+        function updateProgress() {
+            const total = data.length;
+            const done = Object.values(state).filter(c => c >= 3).length;
+            const pct = Math.round((done / total) * 100);
+            document.getElementById('progress-bar').style.width = pct + '%';
+        }
+
+        // Select next question
+        function nextQuestion() {
+            updateProgress();
+            // Check for completion
+            if (Object.values(state).every(c => c >= 3)) {
+                document.getElementById('prompt-container').innerText = 'Well done! You completed the game.';
+                document.getElementById('answer').style.display = 'none';
+                document.getElementById('submit-btn').style.display = 'none';
+                return;
+            }
+            // Filter rows that need more practice
+            const candidates = data
+                .map((row, i) => ({ row, i }))
+                .filter(item => state[item.i] < 3);
+            const { row, i } = choice(candidates);
+            currentRowIndex = i;
+            // Choose a random prompt word based on direction
+            const promptWord = direction === 'sw-fi'
+                ? choice(row.sw)
+                : choice(row.fi);
+            document.getElementById('prompt-container').innerText = promptWord;
+            document.getElementById('answer').value = '';
+            document.getElementById('answer').focus();
+            document.getElementById('feedback').innerText = '';
+        }
+
+        // Handle answer submission
+        function handleSubmit() {
+            const answer = document.getElementById('answer').value.trim().toLowerCase();
+            const synonyms = direction === 'sw-fi'
+                ? data[currentRowIndex].fi
+                : data[currentRowIndex].sw;
+            const normalized = synonyms.map(s => s.toLowerCase());
+            if (normalized.includes(answer)) {
+                // Correct
+                state[currentRowIndex]++;
+                saveState();
+                document.getElementById('feedback').innerText = 'Correct!';
+                document.getElementById('feedback').className = 'correct';
+                setTimeout(nextQuestion, 500);
+            } else {
+                // Wrong or empty
+                state[currentRowIndex] = 0;
+                saveState();
+                document.getElementById('feedback').innerText = 'Wrong. Answers: ' + synonyms.join(', ');
+                document.getElementById('feedback').className = 'wrong';
+                setTimeout(nextQuestion, 4000);
+            }
+        }
+
+        // Set up event listeners
+        window.addEventListener('load', () => {
+            loadState();
+            initData();
+            document.getElementById('sw-fi-btn').addEventListener('click', () => {
+                direction = 'sw-fi';
+                startGame();
+            });
+            document.getElementById('fi-sw-btn').addEventListener('click', () => {
+                direction = 'fi-sw';
+                startGame();
+            });
+            document.getElementById('submit-btn').addEventListener('click', handleSubmit);
+            document.getElementById('answer').addEventListener('keydown', e => {
+                if (e.key === 'Enter') handleSubmit();
+            });
+        });
+    })();
+    </script>
+</body>
+</html>
