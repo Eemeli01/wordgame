@@ -5,34 +5,32 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Swedish-Finnish Word Game</title>
     <style>
-        /* Basic reset and typography */
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body { font-family: sans-serif; padding: 20px; display: flex; flex-direction: column; align-items: center; }
         button, input { font-size: 1em; padding: 10px; margin: 5px 0; }
-
-        /* Hide elements by default */
         .hidden { display: none; }
-
-        /* Centered container */
         .centered { text-align: center; }
-
-        /* Progress bar container */
         #progress-container { width: 100%; max-width: 600px; background: #eee; height: 20px; border-radius: 10px; overflow: hidden; margin-bottom: 20px; }
         #progress-bar { height: 100%; width: 0%; background: #76c7c0; transition: width 0.3s ease; }
-
-        /* Prompt and feedback */
         #prompt-container { font-size: 1.5em; margin-bottom: 10px; }
         #feedback { margin-top: 10px; height: 1.5em; }
         #feedback.correct { color: green; }
         #feedback.wrong { color: red; }
-
-        /* Responsive input */
         #answer { width: 100%; max-width: 600px; }
+        #levels-list { list-style: none; width: 100%; max-width: 400px; }
+        #levels-list li { display: flex; justify-content: space-between; align-items: center; margin: 5px 0; }
+        .completed { color: green; }
     </style>
 </head>
 <body>
+    <!-- Level selection screen -->
+    <div id="level-selection" class="centered">
+        <h1>Select Level</h1>
+        <ul id="levels-list"></ul>
+    </div>
+
     <!-- Direction selection screen -->
-    <div id="direction-selection" class="centered">
+    <div id="direction-selection" class="hidden centered">
         <h1>Choose Translation Direction</h1>
         <button id="sw-fi-btn">Swedish → Finnish</button>
         <button id="fi-sw-btn">Finnish → Swedish</button>
@@ -52,58 +50,90 @@
     <script>
     (function() {
         const CSV_URL = 'data.csv';
-        let data = [];  // Array of {fi: [...], sw: [...]} rows
-        let state = {}; // Map rowIndex -> consecutive correct count
+        const CHUNK_SIZE = 10;
+        let data = [];
+        let state = {};
+        let currentLevel = null; // level index (0-based)
+        let direction = null;
         let currentRowIndex = null;
-        let direction = null; // 'sw-fi' or 'fi-sw'
 
-        // Load saved state from localStorage
         function loadState() {
             const saved = localStorage.getItem('swfi-game-state');
             if (saved) {
                 const obj = JSON.parse(saved);
                 state = obj.state || {};
+                currentLevel = obj.currentLevel;
                 direction = obj.direction || null;
             }
         }
-        // Save state + direction
         function saveState() {
-            localStorage.setItem('swfi-game-state', JSON.stringify({ state, direction }));
+            localStorage.setItem('swfi-game-state', JSON.stringify({ state, currentLevel, direction }));
         }
 
-        // Parse CSV text into data array
         function parseCSV(text) {
             const lines = text.trim().split(/\r?\n/);
             return lines.map(line => {
                 const cols = line.split(',').map(s => s.trim());
-                return {
-                    fi: cols.slice(0,5).filter(Boolean),
-                    sw: cols.slice(5,10).filter(Boolean)
-                };
+                return { fi: cols.slice(0,5).filter(Boolean), sw: cols.slice(5,10).filter(Boolean) };
             });
         }
 
-        // Fetch and initialize game data
         function initData() {
             fetch(CSV_URL)
                 .then(res => res.ok ? res.text() : Promise.reject('Failed to load CSV'))
                 .then(text => {
                     data = parseCSV(text);
-                    // Initialize streaks if not present
                     data.forEach((_, i) => { if (!(i in state)) state[i] = 0; });
-                    saveState();
-                    if (direction) {
-                        // Resume game if direction was chosen
-                        startGame();
+                    renderLevelList();
+                    // Resume if level in progress and not completed
+                    if (currentLevel != null && !isLevelCompleted(currentLevel)) {
+                        showDirection();
                     }
                 })
                 .catch(err => console.error(err));
         }
 
-        // Utility: pick random element
-        function choice(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
+        function isLevelCompleted(level) {
+            const start = level * CHUNK_SIZE;
+            const end = Math.min(data.length, start + CHUNK_SIZE);
+            for (let i = start; i < end; i++) {
+                if (state[i] < 3) return false;
+            }
+            return true;
+        }
 
-        // Start the game after direction is chosen
+        function renderLevelList() {
+            const list = document.getElementById('levels-list');
+            list.innerHTML = '';
+            const totalLevels = Math.ceil(data.length / CHUNK_SIZE);
+            for (let lvl = 0; lvl < totalLevels; lvl++) {
+                const li = document.createElement('li');
+                li.textContent = 'Level ' + (lvl + 1);
+                const btn = document.createElement('button');
+                if (isLevelCompleted(lvl)) {
+                    li.classList.add('completed');
+                    btn.textContent = 'Completed';
+                    btn.disabled = true;
+                } else {
+                    btn.textContent = 'Start';
+                    btn.addEventListener('click', () => selectLevel(lvl));
+                }
+                li.appendChild(btn);
+                list.appendChild(li);
+            }
+        }
+
+        function selectLevel(lvl) {
+            currentLevel = lvl;
+            saveState();
+            showDirection();
+        }
+
+        function showDirection() {
+            document.getElementById('level-selection').classList.add('hidden');
+            document.getElementById('direction-selection').classList.remove('hidden');
+        }
+
         function startGame() {
             document.getElementById('direction-selection').classList.add('hidden');
             document.getElementById('game-screen').classList.remove('hidden');
@@ -111,56 +141,50 @@
             nextQuestion();
         }
 
-        // Compute and update progress bar
         function updateProgress() {
-            const total = data.length;
-            const done = Object.values(state).filter(c => c >= 3).length;
+            const start = currentLevel * CHUNK_SIZE;
+            const end = Math.min(data.length, start + CHUNK_SIZE);
+            const total = end - start;
+            const done = Array.from({length: total}, (_, i) => state[start + i]).filter(c => c >= 3).length;
             const pct = Math.round((done / total) * 100);
             document.getElementById('progress-bar').style.width = pct + '%';
         }
 
-        // Select next question
         function nextQuestion() {
             updateProgress();
-            // Check for completion
-            if (Object.values(state).every(c => c >= 3)) {
-                document.getElementById('prompt-container').innerText = 'Well done! You completed the game.';
+            if (isLevelCompleted(currentLevel)) {
+                document.getElementById('prompt-container').innerText = 'Level completed!';
                 document.getElementById('answer').style.display = 'none';
                 document.getElementById('submit-btn').style.display = 'none';
+                setTimeout(() => location.reload(), 2000);
                 return;
             }
-            // Filter rows that need more practice
-            const candidates = data
-                .map((row, i) => ({ row, i }))
-                .filter(item => state[item.i] < 3);
-            const { row, i } = choice(candidates);
+            const start = currentLevel * CHUNK_SIZE;
+            const end = Math.min(data.length, start + CHUNK_SIZE);
+            const candidates = [];
+            for (let i = start; i < end; i++) if (state[i] < 3) candidates.push(i);
+            const i = candidates[Math.floor(Math.random() * candidates.length)];
             currentRowIndex = i;
-            // Choose a random prompt word based on direction
             const promptWord = direction === 'sw-fi'
-                ? choice(row.sw)
-                : choice(row.fi);
+                ? data[i].sw[Math.floor(Math.random()*data[i].sw.length)]
+                : data[i].fi[Math.floor(Math.random()*data[i].fi.length)];
             document.getElementById('prompt-container').innerText = promptWord;
             document.getElementById('answer').value = '';
             document.getElementById('answer').focus();
             document.getElementById('feedback').innerText = '';
         }
 
-        // Handle answer submission
         function handleSubmit() {
-            const answer = document.getElementById('answer').value.trim().toLowerCase();
-            const synonyms = direction === 'sw-fi'
-                ? data[currentRowIndex].fi
-                : data[currentRowIndex].sw;
-            const normalized = synonyms.map(s => s.toLowerCase());
-            if (normalized.includes(answer)) {
-                // Correct
+            const ans = document.getElementById('answer').value.trim().toLowerCase();
+            const synonyms = direction === 'sw-fi' ? data[currentRowIndex].fi : data[currentRowIndex].sw;
+            const norm = synonyms.map(s => s.toLowerCase());
+            if (norm.includes(ans)) {
                 state[currentRowIndex]++;
                 saveState();
                 document.getElementById('feedback').innerText = 'Correct!';
                 document.getElementById('feedback').className = 'correct';
                 setTimeout(nextQuestion, 500);
             } else {
-                // Wrong or empty
                 state[currentRowIndex] = 0;
                 saveState();
                 document.getElementById('feedback').innerText = 'Wrong. Answers: ' + synonyms.join(', ');
@@ -169,17 +193,14 @@
             }
         }
 
-        // Set up event listeners
         window.addEventListener('load', () => {
             loadState();
             initData();
             document.getElementById('sw-fi-btn').addEventListener('click', () => {
-                direction = 'sw-fi';
-                startGame();
+                direction = 'sw-fi'; startGame();
             });
             document.getElementById('fi-sw-btn').addEventListener('click', () => {
-                direction = 'fi-sw';
-                startGame();
+                direction = 'fi-sw'; startGame();
             });
             document.getElementById('submit-btn').addEventListener('click', handleSubmit);
             document.getElementById('answer').addEventListener('keydown', e => {
