@@ -1,5 +1,4 @@
-<!DOCTYPE html>
-<html lang="en">
+<!DOCTYPE html><html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -13,201 +12,280 @@
         #progress-container { width: 100%; max-width: 600px; background: #eee; height: 20px; border-radius: 10px; overflow: hidden; margin-bottom: 20px; }
         #progress-bar { height: 100%; width: 0%; background: #76c7c0; transition: width 0.3s ease; }
         #prompt-container { font-size: 1.5em; margin-bottom: 10px; }
-        #feedback { margin-top: 10px; height: 1.5em; }
+        #feedback { margin-top: 10px; min-height: 1.5em; }
         #feedback.correct { color: green; }
         #feedback.wrong { color: red; }
         #answer { width: 100%; max-width: 600px; }
-        #levels-list { list-style: none; width: 100%; max-width: 400px; }
-        #levels-list li { display: flex; justify-content: space-between; align-items: center; margin: 5px 0; }
-        .completed { color: green; }
+        #levels-list { list-style: none; width: 100%; max-width: 500px; }
+        #levels-list li { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin: 6px 0; padding: 6px 8px; background: #fafafa; border: 1px solid #eee; border-radius: 10px; }
+        .badge { font-size: 0.8em; padding: 2px 8px; border-radius: 999px; background: #e5f6ee; color: #0a7a55; }
+        .row { display: flex; gap: 8px; }
     </style>
 </head>
 <body>
     <!-- Level selection screen -->
     <div id="level-selection" class="centered">
         <h1>Select Level</h1>
+        <p style="margin: 10px 0 14px; font-size: 0.95em; color:#555">Levels are 10-row chunks. Completed levels can be retaken.</p>
         <ul id="levels-list"></ul>
+    </div><!-- Direction selection screen -->
+<div id="direction-selection" class="hidden centered">
+    <h1>Choose Translation Direction</h1>
+    <button id="sw-fi-btn">Swedish → Finnish</button>
+    <button id="fi-sw-btn">Finnish → Swedish</button>
+</div>
+
+<!-- Game screen -->
+<div id="game-screen" class="hidden centered" style="width:100%; max-width: 600px;">
+    <div id="progress-container">
+        <div id="progress-bar"></div>
     </div>
+    <div id="prompt-container"></div>
+    <input type="text" id="answer" placeholder="Your translation" autocomplete="off" />
+    <button id="submit-btn">Submit</button>
+    <div id="feedback"></div>
+</div>
 
-    <!-- Direction selection screen -->
-    <div id="direction-selection" class="hidden centered">
-        <h1>Choose Translation Direction</h1>
-        <button id="sw-fi-btn">Swedish → Finnish</button>
-        <button id="fi-sw-btn">Finnish → Swedish</button>
-    </div>
+<script>
+(function() {
+    const CSV_URL = 'data.csv';
+    const CHUNK_SIZE = 10;
+    let data = [];
+    let state = {};
+    let currentLevel = null; // level index (0-based)
+    let direction = null; // 'sw-fi' or 'fi-sw'
+    let currentRowIndex = null;
+    let retakeMode = false; // when true, do not change persistent state
+    let retakeRemaining = null; // array of row indices left in this retake session
 
-    <!-- Game screen -->
-    <div id="game-screen" class="hidden centered" style="width:100%; max-width: 600px;">
-        <div id="progress-container">
-            <div id="progress-bar"></div>
-        </div>
-        <div id="prompt-container"></div>
-        <input type="text" id="answer" placeholder="Your translation" autocomplete="off" />
-        <button id="submit-btn">Submit</button>
-        <div id="feedback"></div>
-    </div>
+    // ---- Service Worker: register for offline ----
+    if ('serviceWorker' in navigator) {
+        window.addEventListener('load', () => {
+            navigator.serviceWorker.register('./sw.js').catch(console.error);
+        });
+    }
 
-    <script>
-    (function() {
-        const CSV_URL = 'data.csv';
-        const CHUNK_SIZE = 10;
-        let data = [];
-        let state = {};
-        let currentLevel = null; // level index (0-based)
-        let direction = null;
-        let currentRowIndex = null;
-
-        function loadState() {
-            const saved = localStorage.getItem('swfi-game-state');
-            if (saved) {
-                const obj = JSON.parse(saved);
-                state = obj.state || {};
-                currentLevel = obj.currentLevel;
-                direction = obj.direction || null;
-            }
+    // Load saved state
+    function loadState() {
+        try {
+            const saved = JSON.parse(localStorage.getItem('swfi-game-state') || '{}');
+            state = saved.state || {};
+            currentLevel = saved.currentLevel;
+            direction = saved.direction || null;
+        } catch (_) {
+            state = {}; currentLevel = null; direction = null;
         }
-        function saveState() {
-            localStorage.setItem('swfi-game-state', JSON.stringify({ state, currentLevel, direction }));
-        }
+    }
+    function saveState() {
+        localStorage.setItem('swfi-game-state', JSON.stringify({ state, currentLevel, direction }));
+    }
 
-        function parseCSV(text) {
-            const lines = text.trim().split(/\r?\n/);
-            return lines.map(line => {
-                const cols = line.split(',').map(s => s.trim());
-                return { fi: cols.slice(0,5).filter(Boolean), sw: cols.slice(5,10).filter(Boolean) };
-            });
-        }
+    // Parse CSV: 5 Finnish, 5 Swedish per row
+    function parseCSV(text) {
+        const lines = text.trim().split(/\r?\n/);
+        return lines.map(line => {
+            const cols = line.split(',').map(s => s.trim());
+            // ensure at least 10
+            while (cols.length < 10) cols.push('');
+            return {
+                fi: cols.slice(0,5).filter(Boolean),
+                sw: cols.slice(5,10).filter(Boolean)
+            };
+        });
+    }
 
-        function initData() {
-            fetch(CSV_URL)
-                .then(res => res.ok ? res.text() : Promise.reject('Failed to load CSV'))
-                .then(text => {
-                    data = parseCSV(text);
-                    data.forEach((_, i) => { if (!(i in state)) state[i] = 0; });
-                    renderLevelList();
-                    // Resume if level in progress and not completed
-                    if (currentLevel != null && !isLevelCompleted(currentLevel)) {
-                        showDirection();
-                    }
-                })
-                .catch(err => console.error(err));
-        }
-
-        function isLevelCompleted(level) {
-            const start = level * CHUNK_SIZE;
-            const end = Math.min(data.length, start + CHUNK_SIZE);
-            for (let i = start; i < end; i++) {
-                if (state[i] < 3) return false;
-            }
-            return true;
-        }
-
-        function renderLevelList() {
-            const list = document.getElementById('levels-list');
-            list.innerHTML = '';
-            const totalLevels = Math.ceil(data.length / CHUNK_SIZE);
-            for (let lvl = 0; lvl < totalLevels; lvl++) {
-                const li = document.createElement('li');
-                li.textContent = 'Level ' + (lvl + 1);
-                const btn = document.createElement('button');
-                if (isLevelCompleted(lvl)) {
-                    li.classList.add('completed');
-                    btn.textContent = 'Completed';
-                    btn.disabled = true;
-                } else {
-                    btn.textContent = 'Start';
-                    btn.addEventListener('click', () => selectLevel(lvl));
+    function initData() {
+        fetch(CSV_URL, { cache: 'no-cache' })
+            .then(res => res.ok ? res.text() : Promise.reject('Failed to load CSV'))
+            .then(text => {
+                data = parseCSV(text);
+                // Initialize streaks for any new rows
+                data.forEach((_, i) => { if (!(i in state)) state[i] = 0; });
+                renderLevelList();
+                // If we were in the middle of an incomplete level, resume
+                if (currentLevel != null && !isLevelCompleted(currentLevel)) {
+                    showDirection();
                 }
-                li.appendChild(btn);
-                list.appendChild(li);
+            })
+            .catch(err => {
+                console.error(err);
+                // If offline and cached, still continue; SW should serve cached CSV
+                renderLevelList();
+            });
+    }
+
+    function isLevelCompleted(level) {
+        const start = level * CHUNK_SIZE;
+        const end = Math.min(data.length, start + CHUNK_SIZE);
+        for (let i = start; i < end; i++) {
+            if (state[i] < 3) return false;
+        }
+        return true;
+    }
+
+    function renderLevelList() {
+        const list = document.getElementById('levels-list');
+        list.innerHTML = '';
+        const totalLevels = Math.ceil(data.length / CHUNK_SIZE) || 0;
+        for (let lvl = 0; lvl < totalLevels; lvl++) {
+            const li = document.createElement('li');
+            const label = document.createElement('div');
+            label.textContent = 'Level ' + (lvl + 1);
+            const controls = document.createElement('div');
+            controls.className = 'row';
+
+            const startBtn = document.createElement('button');
+            startBtn.textContent = 'Start';
+            startBtn.addEventListener('click', () => { selectLevel(lvl, false); });
+            // Only allow start for incomplete levels (per original rule)
+            if (isLevelCompleted(lvl)) startBtn.disabled = true;
+            controls.appendChild(startBtn);
+
+            // Retake button always enabled if completed
+            const completed = isLevelCompleted(lvl);
+            if (completed) {
+                const badge = document.createElement('span');
+                badge.textContent = 'Completed';
+                badge.className = 'badge';
+                li.appendChild(badge);
+
+                const retakeBtn = document.createElement('button');
+                retakeBtn.textContent = 'Retake';
+                retakeBtn.addEventListener('click', () => { selectLevel(lvl, true); });
+                controls.appendChild(retakeBtn);
             }
-        }
 
-        function selectLevel(lvl) {
-            currentLevel = lvl;
-            saveState();
-            showDirection();
+            li.appendChild(label);
+            li.appendChild(controls);
+            list.appendChild(li);
         }
+    }
 
-        function showDirection() {
-            document.getElementById('level-selection').classList.add('hidden');
-            document.getElementById('direction-selection').classList.remove('hidden');
-        }
+    function selectLevel(lvl, asRetake) {
+        currentLevel = lvl;
+        retakeMode = !!asRetake;
+        retakeRemaining = null; // reset per session
+        saveState();
+        showDirection();
+    }
 
-        function startGame() {
-            document.getElementById('direction-selection').classList.add('hidden');
-            document.getElementById('game-screen').classList.remove('hidden');
-            saveState();
-            nextQuestion();
-        }
+    function showDirection() {
+        document.getElementById('level-selection').classList.add('hidden');
+        document.getElementById('direction-selection').classList.remove('hidden');
+    }
 
-        function updateProgress() {
-            const start = currentLevel * CHUNK_SIZE;
-            const end = Math.min(data.length, start + CHUNK_SIZE);
-            const total = end - start;
-            const done = Array.from({length: total}, (_, i) => state[start + i]).filter(c => c >= 3).length;
-            const pct = Math.round((done / total) * 100);
-            document.getElementById('progress-bar').style.width = pct + '%';
-        }
+    function startGame() {
+        document.getElementById('direction-selection').classList.add('hidden');
+        document.getElementById('game-screen').classList.remove('hidden');
+        saveState();
+        nextQuestion();
+    }
 
-        function nextQuestion() {
-            updateProgress();
+    function updateProgress() {
+        const start = currentLevel * CHUNK_SIZE;
+        const end = Math.min(data.length, start + CHUNK_SIZE);
+        const total = Math.max(0, end - start);
+        let done = 0;
+        for (let i = start; i < end; i++) if (state[i] >= 3) done++;
+        const pct = total ? Math.round((done / total) * 100) : 0;
+        document.getElementById('progress-bar').style.width = pct + '%';
+    }
+
+    function levelIndices(level) {
+        const start = level * CHUNK_SIZE;
+        const end = Math.min(data.length, start + CHUNK_SIZE);
+        return Array.from({length: end - start}, (_, k) => start + k);
+    }
+
+    function nextQuestion() {
+        updateProgress();
+
+        if (!retakeMode) {
             if (isLevelCompleted(currentLevel)) {
                 document.getElementById('prompt-container').innerText = 'Level completed!';
                 document.getElementById('answer').style.display = 'none';
                 document.getElementById('submit-btn').style.display = 'none';
-                setTimeout(() => location.reload(), 2000);
+                setTimeout(() => {
+                    // Back to level select so user can choose another level or retake
+                    document.getElementById('game-screen').classList.add('hidden');
+                    document.getElementById('level-selection').classList.remove('hidden');
+                    renderLevelList();
+                }, 1200);
                 return;
             }
-            const start = currentLevel * CHUNK_SIZE;
-            const end = Math.min(data.length, start + CHUNK_SIZE);
-            const candidates = [];
-            for (let i = start; i < end; i++) if (state[i] < 3) candidates.push(i);
-            const i = candidates[Math.floor(Math.random() * candidates.length)];
-            currentRowIndex = i;
-            const promptWord = direction === 'sw-fi'
-                ? data[i].sw[Math.floor(Math.random()*data[i].sw.length)]
-                : data[i].fi[Math.floor(Math.random()*data[i].fi.length)];
-            document.getElementById('prompt-container').innerText = promptWord;
-            document.getElementById('answer').value = '';
-            document.getElementById('answer').focus();
-            document.getElementById('feedback').innerText = '';
+            const candidates = levelIndices(currentLevel).filter(i => state[i] < 3);
+            currentRowIndex = candidates[Math.floor(Math.random() * candidates.length)];
+        } else {
+            // Retake mode: ask each row exactly once (one pass), independent of state
+            if (!retakeRemaining) retakeRemaining = levelIndices(currentLevel).slice();
+            if (retakeRemaining.length === 0) {
+                document.getElementById('prompt-container').innerText = 'Retake complete!';
+                document.getElementById('answer').style.display = 'none';
+                document.getElementById('submit-btn').style.display = 'none';
+                setTimeout(() => {
+                    document.getElementById('game-screen').classList.add('hidden');
+                    document.getElementById('level-selection').classList.remove('hidden');
+                    renderLevelList();
+                }, 1200);
+                return;
+            }
+            // Pick a random remaining row; remove after answering in handleSubmit
+            currentRowIndex = retakeRemaining[Math.floor(Math.random() * retakeRemaining.length)];
         }
 
-        function handleSubmit() {
-            const ans = document.getElementById('answer').value.trim().toLowerCase();
-            const synonyms = direction === 'sw-fi' ? data[currentRowIndex].fi : data[currentRowIndex].sw;
-            const norm = synonyms.map(s => s.toLowerCase());
-            if (norm.includes(ans)) {
-                state[currentRowIndex]++;
+        const row = data[currentRowIndex];
+        const promptWord = direction === 'sw-fi' ? row.sw[Math.floor(Math.random()*row.sw.length)]
+                                                 : row.fi[Math.floor(Math.random()*row.fi.length)];
+        document.getElementById('prompt-container').innerText = promptWord || '(empty)';
+        document.getElementById('answer').value = '';
+        document.getElementById('answer').style.display = '';
+        document.getElementById('submit-btn').style.display = '';
+        document.getElementById('answer').focus();
+        document.getElementById('feedback').innerText = '';
+    }
+
+    function handleSubmit() {
+        const ans = document.getElementById('answer').value.trim().toLowerCase();
+        const synonyms = direction === 'sw-fi' ? data[currentRowIndex].fi : data[currentRowIndex].sw;
+        const norm = synonyms.map(s => s.toLowerCase());
+        const correct = ans && norm.includes(ans);
+
+        if (correct) {
+            if (!retakeMode) {
+                state[currentRowIndex] = (state[currentRowIndex] || 0) + 1;
                 saveState();
-                document.getElementById('feedback').innerText = 'Correct!';
-                document.getElementById('feedback').className = 'correct';
-                setTimeout(nextQuestion, 500);
-            } else {
+            }
+            document.getElementById('feedback').innerText = 'Correct!';
+            document.getElementById('feedback').className = 'correct';
+            if (retakeMode) {
+                // remove from remaining
+                retakeRemaining = retakeRemaining.filter(i => i !== currentRowIndex);
+            }
+            setTimeout(nextQuestion, 500);
+        } else {
+            if (!retakeMode) {
                 state[currentRowIndex] = 0;
                 saveState();
-                document.getElementById('feedback').innerText = 'Wrong. Answers: ' + synonyms.join(', ');
-                document.getElementById('feedback').className = 'wrong';
-                setTimeout(nextQuestion, 4000);
+            } else {
+                // In retake, still remove after showing the right answer
+                retakeRemaining = retakeRemaining.filter(i => i !== currentRowIndex);
             }
+            document.getElementById('feedback').innerText = 'Answers: ' + (synonyms.join(', ') || '(none)');
+            document.getElementById('feedback').className = 'wrong';
+            setTimeout(nextQuestion, 4000);
         }
+    }
 
-        window.addEventListener('load', () => {
-            loadState();
-            initData();
-            document.getElementById('sw-fi-btn').addEventListener('click', () => {
-                direction = 'sw-fi'; startGame();
-            });
-            document.getElementById('fi-sw-btn').addEventListener('click', () => {
-                direction = 'fi-sw'; startGame();
-            });
-            document.getElementById('submit-btn').addEventListener('click', handleSubmit);
-            document.getElementById('answer').addEventListener('keydown', e => {
-                if (e.key === 'Enter') handleSubmit();
-            });
-        });
-    })();
-    </script>
+    window.addEventListener('load', () => {
+        loadState();
+        initData();
+        document.getElementById('sw-fi-btn').addEventListener('click', () => { direction = 'sw-fi'; startGame(); });
+        document.getElementById('fi-sw-btn').addEventListener('click', () => { direction = 'fi-sw'; startGame(); });
+        document.getElementById('submit-btn').addEventListener('click', handleSubmit);
+        document.getElementById('answer').addEventListener('keydown', e => { if (e.key === 'Enter') handleSubmit(); });
+    });
+})();
+</script>
+
 </body>
 </html>
